@@ -10,12 +10,11 @@ app.use(express.json());
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const { GHL_TOKEN, CALENDAR_ID, LOCATION_ID } = process.env;
 
-// Filtra solo slot lun–ven (1..5), 09–13 / 15–18
+// Filtra slot: lun–ven (1..5), fasce 09–13 / 15–18
 function slotConsentito(isoString) {
-  // ATTENZIONE: assumiamo che GHL risponda con orari coerenti al timezone richiesto.
-  // Se noti sfasamenti, poi ti preparo la versione con Luxon e conversione Europe/Rome.
+  // Assumiamo che GHL risponda coerente col timezone richiesto.
   const d = new Date(isoString);
-  const day = d.getDay();    // 0=Dom, ... 6=Sab
+  const day = d.getDay();    // 0=Dom .. 6=Sab
   const hour = d.getHours(); // 0-23
   const feriale = day >= 1 && day <= 5;
   const mattina = hour >= 9 && hour < 13;
@@ -23,7 +22,7 @@ function slotConsentito(isoString) {
   return feriale && (mattina || pomeriggio);
 }
 
-// Health check
+// Healthcheck
 app.get("/health", (_, res) => res.send("ok"));
 
 /**
@@ -31,19 +30,19 @@ app.get("/health", (_, res) => res.send("ok"));
  * Body (opzionale):
  * {
  *   "startDate": "2025-10-03",  // oppure ISO completo; se omesso = oggi
- *   "days": 14                  // estensione finestra di ricerca
+ *   "days": 14                  // estensione finestra
  * }
  */
 app.post("/retell/get-free-slots", async (req, res) => {
   try {
     const { startDate, days = 14 } = req.body || {};
 
-    // start: se ci dai "YYYY-MM-DD" o un ISO, lo trasformiamo in Date; se no oggi
+    // Converte "YYYY-MM-DD" o ISO in Date; se non fornita, oggi
     const start = startDate ? new Date(startDate) : new Date();
     const end = new Date(start);
     end.setDate(end.getDate() + Number(days));
 
-    // ⛳️ GHL si aspetta startDate / endDate in EPOCH (millisecondi)
+    // ⚠️ GHL richiede startDate/endDate in epoch millisecondi
     const params = {
       startDate: start.getTime(),
       endDate: end.getTime(),
@@ -52,13 +51,16 @@ app.post("/retell/get-free-slots", async (req, res) => {
 
     const headers = {
       Authorization: `Bearer ${GHL_TOKEN}`,
-      Accept: "application/json"
+      Accept: "application/json",
+      Version: "2021-07-28"
     };
+
+    console.log(">> GET free-slots params:", params);
 
     const url = `${GHL_BASE}/calendars/${CALENDAR_ID}/free-slots`;
     const { data } = await axios.get(url, { params, headers });
 
-    // Alcune installazioni rispondono { slots: [...] }, altre direttamente un array
+    // Normalizza risposta: { slots: [...] } oppure direttamente [...]
     const rawSlots = Array.isArray(data) ? data : (data?.slots || []);
     const filtered = rawSlots
       .filter(s => s?.startTime && slotConsentito(s.startTime))
@@ -70,8 +72,10 @@ app.post("/retell/get-free-slots", async (req, res) => {
       slots: filtered
     });
   } catch (err) {
-    console.error("free-slots error:", err?.response?.data || err.message);
-    return res.status(500).json({ error: "Impossibile recuperare gli slot liberi" });
+    const status = err?.response?.status || 500;
+    const payload = err?.response?.data || { message: err.message };
+    console.error("free-slots error:", payload);
+    return res.status(status).json({ error: "GHL error on free-slots", detail: payload });
   }
 });
 
@@ -82,7 +86,7 @@ app.post("/retell/get-free-slots", async (req, res) => {
  *   "name": "Mario Rossi",
  *   "email": "mario@example.com",
  *   "phone": "+39333...",
- *   "startTime": "2025-10-07T09:00:00+02:00", // ISO con offset Roma
+ *   "startTime": "2025-10-07T09:00:00+02:00", // ISO con offset (Roma)
  *   "endTime":   "2025-10-07T09:30:00+02:00",
  *   "title": "Appuntamento"                    // opzionale
  * }
@@ -96,22 +100,24 @@ app.post("/retell/book-appointment", async (req, res) => {
 
     const headers = {
       Authorization: `Bearer ${GHL_TOKEN}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Version: "2021-07-28"
     };
 
-    // 1) Upsert contatto (per ottenere contactId)
+    // 1) Upsert contatto per ottenere contactId
     const upsertResp = await axios.post(
       `${GHL_BASE}/contacts/upsert`,
       { name, email, phone, locationId: LOCATION_ID },
       { headers }
     );
+
     const contactId =
       upsertResp?.data?.contact?.id ||
       upsertResp?.data?.id ||
       upsertResp?.data?.contactId;
 
     if (!contactId) {
-      return res.status(500).json({ error: "Impossibile ottenere contactId dall'upsert" });
+      return res.status(502).json({ error: "GHL upsert contact: id mancante", detail: upsertResp?.data });
     }
 
     // 2) Crea appuntamento
@@ -123,8 +129,10 @@ app.post("/retell/book-appointment", async (req, res) => {
 
     return res.json({ ok: true, appointment: createResp.data });
   } catch (err) {
-    console.error("book-appointment error:", err?.response?.data || err.message);
-    return res.status(500).json({ error: "Impossibile creare l'appuntamento" });
+    const status = err?.response?.status || 500;
+    const payload = err?.response?.data || { message: err.message };
+    console.error("book-appointment error:", payload);
+    return res.status(status).json({ error: "GHL error on book-appointment", detail: payload });
   }
 });
 
